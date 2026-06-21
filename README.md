@@ -2,7 +2,9 @@
 
 [![ci](https://github.com/trustos/ccstack/actions/workflows/ci.yml/badge.svg)](https://github.com/trustos/ccstack/actions/workflows/ci.yml)
 
-One reversible CLI to set up and manage the **Claude Code** stack *and* the local **OpenCode → MTPLX Router → mtplx** stack — attribution-header KV-cache stability, Headroom compression (MCP for subscriptions; optional local proxy), opencode.json provider/agent wiring, and per-session **token / cache / $ / compression** metrics — where **every change is recorded and fully reversible to a clean slate**.
+One reversible CLI for the **caching/compression** layer of the stack: the **Claude Code** side (attribution-header KV-cache stability, Headroom MCP compression) and the local **OpenCode → MTPLX Router → mtplx** side (an optional Headroom cache hop inserted between the router and mtplx), plus per-session **token / cache / $ / compression** metrics — where **every change is recorded and fully reversible to a clean slate**.
+
+> `opencode.json` itself (the `mtplx` provider, agents, model wiring) is owned by the **MTPLX Router**, which holds the model list natively and writes the canonical mtplx config. ccstack does **not** touch `opencode.json` — it only inserts the cache hop via the router's `compressionProxyURL`.
 
 Design & rationale: [`../LocalInference/CCSTACK_DESIGN.md`](../LocalInference/CCSTACK_DESIGN.md). End-to-end runbook: [`../LocalInference/CLAUDE_CODE_HANDOFF.md`](../LocalInference/CLAUDE_CODE_HANDOFF.md).
 
@@ -25,8 +27,7 @@ make help                    # list all targets
 | `~/.claude/agents/executor.md` | `file_create` | local-model executor subagent (hybrid) |
 | `~/.claude-code-router/config.json` | `file_create` | hybrid router — **API-key billing only** (breaks a Claude subscription's OAuth); opt in with `api_key_billing = true` |
 | `~/.claude/CLAUDE.md` → `headroom_compress` rule | `text_block` | sentinel-delimited usage rule (subscription MCP is on-demand) |
-| `opencode.json` → `provider.mtplx` + `agent.plan/build.model` + `model`/`small_model` | `json_key` | wire OpenCode at the MTPLX Router (carried per-model limits/reasoning/tool_call; preserves your personas) |
-| MTPLX Router `config.json` → `compressionProxyURL` | `json_key` | forward through the Headroom proxy (when `[opencode_local].headroom = true`) |
+| MTPLX Router `config.json` → `compressionProxyURL` | `json_key` | route the router through the Headroom cache hop (when `[opencode_local].headroom = true`) |
 | Headroom proxy launchd agent | `service` | run `headroom proxy` (cache mode) → mtplx, when enabled |
 | `~/.headroom-venv` (Python 3.13) | `pkg_install` | auto-create venv + `pip install headroom-ai[…]` (opt-in removal; needs `brew install python@3.13`) |
 

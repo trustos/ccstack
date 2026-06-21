@@ -65,23 +65,15 @@ pub struct Provider {
     pub api_key: Option<String>,
 }
 
-/// The local OpenCode -> MTPLX Router -> mtplx stack (+ optional Headroom proxy hop).
-/// ccstack renders the `mtplx` provider into opencode.json and wires plan/build.
+/// The local OpenCode -> MTPLX Router -> mtplx caching hop. The MTPLX Router owns
+/// opencode.json (provider/agents — it holds the model list natively); ccstack's only job
+/// here is CACHING: bring up Headroom and insert it between the router and mtplx.
 #[derive(Debug, Default, Deserialize)]
 pub struct OpenCodeLocal {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
-    pub router_url: Option<String>,
-    #[serde(default)]
-    pub planner_id: Option<String>,
-    #[serde(default)]
-    pub builder_id: Option<String>,
-    #[serde(default)]
-    pub planner_context: Option<u32>,
-    #[serde(default)]
-    pub builder_context: Option<u32>,
-    /// MTPLX Router config.json — so ccstack can flip its compression-proxy toggle.
+    /// MTPLX Router config.json — so ccstack can flip its `compressionProxyURL` toggle to
+    /// route the router through the Headroom cache.
     #[serde(default)]
     pub router_config_path: Option<String>,
     /// Local Headroom compression hop. OFF by default — local benefit is speed/memory
@@ -137,15 +129,11 @@ api_key_billing = false
 headroom = true
 headroom_mode = "mcp"
 
-# The local OpenCode -> MTPLX Router -> mtplx stack. ccstack writes the `mtplx`
-# provider into opencode.json and wires plan->planner / build->builder.
+# Local caching hop for OpenCode -> MTPLX Router -> mtplx. The MTPLX Router owns
+# opencode.json (its menu "Write OpenCode config" generates the canonical mtplx provider);
+# ccstack only inserts the Headroom cache between the router and mtplx.
 [opencode_local]
 enabled        = true
-router_url     = "http://127.0.0.1:11435/v1"
-planner_id     = "mtplx-qwen36-27b-optimized-quality"
-builder_id     = "mtplx-qwen36-35b-a3b-optimized-speed"
-planner_context = 65536
-builder_context = 131072
 router_config_path = "~/Library/Application Support/MTPLX Router/config.json"
 # Local Headroom compression hop. OFF by default (speed/memory only; costs prefix-cache
 # churn; $0 tokens locally). Flip to true ONLY for long, context-heavy sessions.

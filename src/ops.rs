@@ -144,49 +144,10 @@ fn plan_changes(cfg: &DeclaredConfig) -> Vec<Planned> {
     // Local stack: OpenCode -> MTPLX Router -> mtplx (+ optional Headroom proxy hop).
     let oc = &cfg.opencode_local;
     if oc.enabled {
-        let router_url = oc
-            .router_url
-            .clone()
-            .unwrap_or_else(|| "http://127.0.0.1:11435/v1".to_string());
-        let planner = oc
-            .planner_id
-            .clone()
-            .unwrap_or_else(|| "planner".to_string());
-        let builder = oc
-            .builder_id
-            .clone()
-            .unwrap_or_else(|| "builder".to_string());
-
-        // provider.mtplx — the whole openai-compatible provider, in one JsonKey.
-        out.push(Planned {
-            profile: "opencode".into(),
-            kind: ChangeKind::JsonKey,
-            target: "~/.config/opencode/opencode.json".into(),
-            key_path: Some("provider.mtplx".into()),
-            value: Some(opencode_provider(&router_url, &planner, &builder, oc)),
-            contents: None,
-            applied_value: Some("mtplx provider".into()),
-        });
-
-        // agent + default model wiring (each its own JsonKey → preserves siblings like prompt/temperature).
-        for (k, m) in [
-            ("agent.plan.model", &planner),
-            ("agent.build.model", &builder),
-            ("model", &builder),
-            ("small_model", &builder),
-        ] {
-            out.push(Planned {
-                profile: "opencode".into(),
-                kind: ChangeKind::JsonKey,
-                target: "~/.config/opencode/opencode.json".into(),
-                key_path: Some(k.to_string()),
-                value: Some(Value::String(format!("mtplx/{}", m))),
-                contents: None,
-                applied_value: None,
-            });
-        }
-
-        // Optional Headroom compression hop (router -> headroom:port -> mtplx).
+        // NB: opencode.json (provider / agents / plugin) is owned by the MTPLX Router, not
+        // ccstack — the router holds the model list natively and writes its own OpenCode
+        // provider. ccstack's only role in the local path is CACHING: inserting the Headroom
+        // hop (router -> headroom:port -> mtplx).
         if oc.headroom {
             let port = oc.headroom_port.unwrap_or(8787);
             if let Some(rc) = &oc.router_config_path {
@@ -229,33 +190,6 @@ fn plan_changes(cfg: &DeclaredConfig) -> Vec<Planned> {
 }
 
 const CLAUDE_MD_RULE: &str = "## Headroom compression\n\nBefore reasoning over a large file read, log, or tool dump, compress it with the `headroom_compress` MCP tool and keep the returned hash; call `headroom_retrieve` if you later need the original. Keeps context small without losing information.";
-
-/// Build the openai-compatible `mtplx` provider object for opencode.json.
-fn opencode_provider(
-    router_url: &str,
-    planner: &str,
-    builder: &str,
-    oc: &crate::config::OpenCodeLocal,
-) -> Value {
-    let model_entry = |ctx: Option<u32>| {
-        serde_json::json!({
-            "limit": {"context": ctx.unwrap_or(131072), "output": 32768},
-            "reasoning": true,
-            "tool_call": true,
-            "temperature": false,
-            "modalities": {"input": ["text"], "output": ["text"]}
-        })
-    };
-    let mut models = serde_json::Map::new();
-    models.insert(planner.to_string(), model_entry(oc.planner_context));
-    models.insert(builder.to_string(), model_entry(oc.builder_context));
-    serde_json::json!({
-        "npm": "@ai-sdk/openai-compatible",
-        "name": "MTPLX Router",
-        "options": {"baseURL": router_url},
-        "models": Value::Object(models)
-    })
-}
 
 /// A launchd plist that runs `headroom proxy` pointed at mtplx (compression-only, cache mode).
 fn headroom_plist(cfg: &DeclaredConfig, oc: &crate::config::OpenCodeLocal, port: u32) -> String {
