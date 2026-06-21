@@ -40,7 +40,10 @@ struct RunDelta {
 
 /// Snapshot cumulative metrics right before a task.
 pub fn begin(label: &str) -> Result<()> {
-    let snap = Snapshot { ts: now_secs(), agg: stats::aggregate()? };
+    let snap = Snapshot {
+        ts: now_secs(),
+        agg: stats::aggregate()?,
+    };
     let p = measure_dir()?.join(format!("{label}.begin.json"));
     std::fs::write(&p, serde_json::to_string_pretty(&snap)?)?;
     println!("measure '{label}' started — baseline snapshot saved.");
@@ -91,7 +94,13 @@ fn load_run(label: &str) -> Result<RunDelta> {
 }
 
 fn row_int(name: &str, a: u64, b: u64) {
-    println!("{:<16} {:>14} {:>14} {:>12}", name, a, b, b as i64 - a as i64);
+    println!(
+        "{:<16} {:>14} {:>14} {:>12}",
+        name,
+        a,
+        b,
+        b as i64 - a as i64
+    );
 }
 
 fn row_money(name: &str, a: f64, b: f64) {
@@ -110,6 +119,8 @@ pub fn compare(a: &str, b: &str) -> Result<()> {
     row_money("cost_usd", da.cost_usd, db.cost_usd);
     row_int("hr_saved", da.hr_saved, db.hr_saved);
     println!();
-    println!("lower input/cost on the stack-on run = the stack helps; higher cache_read/hr_saved = why.");
+    println!(
+        "lower input/cost on the stack-on run = the stack helps; higher cache_read/hr_saved = why."
+    );
     Ok(())
 }

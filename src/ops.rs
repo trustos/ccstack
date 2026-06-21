@@ -89,6 +89,26 @@ fn plan_changes(cfg: &DeclaredConfig) -> Vec<Planned> {
         .values()
         .any(|p| p.headroom && p.headroom_mode.as_deref() != Some("proxy"));
     if wants_headroom_mcp {
+        // Ensure the 3.13 headroom venv exists (pkg_install no-ops if already present).
+        let venv = cfg
+            .global
+            .headroom_venv
+            .clone()
+            .unwrap_or_else(|| "~/.headroom-venv".to_string());
+        let extras = cfg
+            .global
+            .headroom_extras
+            .clone()
+            .unwrap_or_else(|| "mcp,pytorch-mps,code".to_string());
+        out.push(Planned {
+            profile: "headroom".into(),
+            kind: ChangeKind::PkgInstall,
+            target: venv,
+            key_path: None,
+            value: None,
+            contents: Some(format!("headroom-ai[{}]", extras)),
+            applied_value: None,
+        });
         // headroom-ai needs Python <=3.13, so register the ABSOLUTE path to a
         // 3.13-venv `headroom` rather than bare `headroom` on PATH (which won't
         // resolve when the default python is 3.14+).
@@ -128,8 +148,14 @@ fn plan_changes(cfg: &DeclaredConfig) -> Vec<Planned> {
             .router_url
             .clone()
             .unwrap_or_else(|| "http://127.0.0.1:11435/v1".to_string());
-        let planner = oc.planner_id.clone().unwrap_or_else(|| "planner".to_string());
-        let builder = oc.builder_id.clone().unwrap_or_else(|| "builder".to_string());
+        let planner = oc
+            .planner_id
+            .clone()
+            .unwrap_or_else(|| "planner".to_string());
+        let builder = oc
+            .builder_id
+            .clone()
+            .unwrap_or_else(|| "builder".to_string());
 
         // provider.mtplx — the whole openai-compatible provider, in one JsonKey.
         out.push(Planned {
@@ -237,7 +263,10 @@ fn headroom_plist(cfg: &DeclaredConfig, oc: &crate::config::OpenCodeLocal, port:
     let bin = util::expand_tilde(bin_raw)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| bin_raw.to_string());
-    let mode = oc.headroom_mode.clone().unwrap_or_else(|| "cache".to_string());
+    let mode = oc
+        .headroom_mode
+        .clone()
+        .unwrap_or_else(|| "cache".to_string());
     let upstream = oc
         .headroom_upstream
         .clone()
@@ -374,10 +403,11 @@ pub fn apply(dry: bool) -> Result<()> {
                 pc.contents.as_deref().unwrap_or(""),
                 dry,
             )?,
-            ChangeKind::Service => render::apply_service(pc.contents.as_deref().unwrap_or(""), dry)?,
-            _ => {
-                println!("  ! {:?} not yet implemented (skeleton)", pc.kind);
-                continue;
+            ChangeKind::Service => {
+                render::apply_service(pc.contents.as_deref().unwrap_or(""), dry)?
+            }
+            ChangeKind::PkgInstall => {
+                render::apply_pkg_install(&target, pc.contents.as_deref().unwrap_or(""), dry)?
             }
         };
 
@@ -431,7 +461,11 @@ fn sync_state(c: &Change, target: &Path) -> Result<&'static str> {
                 Some(_) => "drifted",
             })
         }
-        _ => Ok("n/a"),
+        ChangeKind::PkgInstall => Ok(match render::current_pkg_install(target)? {
+            None => "missing",
+            Some(_) => "in-sync",
+        }),
+        ChangeKind::Service => Ok("n/a"),
     }
 }
 
@@ -441,7 +475,10 @@ pub fn status() -> Result<()> {
         println!("no changes applied yet.");
         return Ok(());
     }
-    println!("{:<8} {:<8} {:<11} {:<9} target", "id", "profile", "kind", "sync");
+    println!(
+        "{:<8} {:<8} {:<11} {:<9} target",
+        "id", "profile", "kind", "sync"
+    );
     for c in ledger.active() {
         let target = util::expand_tilde(&c.target)?;
         let sync = sync_state(c, &target)?;
@@ -502,22 +539,28 @@ pub fn revert(all: bool, profile: Option<String>, change: Option<String>) -> Res
         let c = ledger.changes[i].clone();
         let target = util::expand_tilde(&c.target)?;
         if sync_state(&c, &target)? == "drifted" {
-            println!("  ! {} drifted at {} — skipping (resolve manually)", c.id, c.target);
+            println!(
+                "  ! {} drifted at {} — skipping (resolve manually)",
+                c.id, c.target
+            );
             continue;
         }
         match &c.kind {
-            ChangeKind::JsonKey => {
-                render::revert_json_key(&target, c.key_path.as_deref().unwrap_or_default(), &c.prior)?
-            }
+            ChangeKind::JsonKey => render::revert_json_key(
+                &target,
+                c.key_path.as_deref().unwrap_or_default(),
+                &c.prior,
+            )?,
             ChangeKind::FileCreate => render::revert_file_create(&target, &c.prior)?,
-            ChangeKind::TextBlock => {
-                render::revert_text_block(&target, c.key_path.as_deref().unwrap_or_default(), &c.prior)?
+            ChangeKind::TextBlock => render::revert_text_block(
+                &target,
+                c.key_path.as_deref().unwrap_or_default(),
+                &c.prior,
+            )?,
+            ChangeKind::Service => {
+                render::revert_service(c.applied_value.as_deref().unwrap_or_default())?
             }
-            ChangeKind::Service => render::revert_service(c.applied_value.as_deref().unwrap_or_default())?,
-            _ => {
-                println!("  ! {:?} revert not implemented (skeleton)", c.kind);
-                continue;
-            }
+            ChangeKind::PkgInstall => render::revert_pkg_install(&target, &c.prior)?,
         }
         ledger.changes[i].status = Status::Reverted;
         println!("  reverted {} ({})", c.id, c.target);

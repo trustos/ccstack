@@ -30,6 +30,12 @@ pub struct Global {
     /// Write a `headroom_compress` usage rule into ~/.claude/CLAUDE.md (text_block).
     #[serde(default)]
     pub claude_md_rule: bool,
+    /// 3.13 venv ccstack creates (pkg_install) if missing, to host headroom-ai.
+    #[serde(default)]
+    pub headroom_venv: Option<String>,
+    /// headroom-ai extras to install (pytorch-mps = the ML compressor for Apple Silicon).
+    #[serde(default)]
+    pub headroom_extras: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -92,8 +98,8 @@ pub struct OpenCodeLocal {
 
 impl DeclaredConfig {
     pub fn load(path: &Path) -> Result<Self> {
-        let txt = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let txt =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         toml::from_str(&txt).context("parsing ccstack.toml")
     }
 
@@ -109,6 +115,8 @@ attribution_header = false        # -> CLAUDE_CODE_ATTRIBUTION_HEADER=0 (safe on
 # MCP entry registers an absolute path, not bare `headroom` on PATH.
 headroom_bin = "~/.headroom-venv/bin/headroom"
 claude_md_rule = true             # write a headroom_compress usage rule into ~/.claude/CLAUDE.md
+headroom_venv = "~/.headroom-venv"          # ccstack creates this 3.13 venv if missing (pkg_install)
+headroom_extras = "mcp,pytorch-mps,code"    # headroom-ai extras (pytorch-mps = the ML compressor)
 
 # Subscription (OAuth) users: safe, non-routing optimizations only.
 # Headroom runs in MCP mode (compression exposed as tools), NOT as a proxy.

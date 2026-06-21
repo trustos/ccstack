@@ -103,7 +103,11 @@ pub fn apply_json_key(
     if dry {
         println!("  ~ {} :: {} = {}", target.display(), key_path, value);
         return Ok((
-            Prior { present: prior_val.is_some(), value: prior_val, snapshot: None },
+            Prior {
+                present: prior_val.is_some(),
+                value: prior_val,
+                snapshot: None,
+            },
             region_hash,
         ));
     }
@@ -111,7 +115,11 @@ pub fn apply_json_key(
     set_at(&mut root, &parts, value);
     write_json(target, &root)?;
     Ok((
-        Prior { present: prior_val.is_some(), value: prior_val, snapshot },
+        Prior {
+            present: prior_val.is_some(),
+            value: prior_val,
+            snapshot,
+        },
         region_hash,
     ))
 }
@@ -141,14 +149,28 @@ pub fn apply_file_create(target: &Path, contents: &str, dry: bool) -> Result<(Pr
     let region_hash = util::sha256_hex(contents.as_bytes());
     if dry {
         println!("  + {} (file_create)", target.display());
-        return Ok((Prior { present: existed, value: None, snapshot: None }, region_hash));
+        return Ok((
+            Prior {
+                present: existed,
+                value: None,
+                snapshot: None,
+            },
+            region_hash,
+        ));
     }
     let snapshot = if existed { backup_file(target)? } else { None };
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(target, contents)?;
-    Ok((Prior { present: existed, value: None, snapshot }, region_hash))
+    Ok((
+        Prior {
+            present: existed,
+            value: None,
+            snapshot,
+        },
+        region_hash,
+    ))
 }
 
 pub fn revert_file_create(target: &Path, prior: &Prior) -> Result<()> {
@@ -199,10 +221,21 @@ pub fn apply_text_block(
     let region_hash = util::sha256_hex(contents.as_bytes());
     if dry {
         println!("  ~ {} :: text_block '{}'", target.display(), marker);
-        return Ok((Prior { present: existed, value: None, snapshot: None }, region_hash));
+        return Ok((
+            Prior {
+                present: existed,
+                value: None,
+                snapshot: None,
+            },
+            region_hash,
+        ));
     }
     let snapshot = if existed { backup_file(target)? } else { None };
-    let old = if existed { std::fs::read_to_string(target)? } else { String::new() };
+    let old = if existed {
+        std::fs::read_to_string(target)?
+    } else {
+        String::new()
+    };
     let block = format!("{}\n{}\n{}", begin, contents, end);
     let new = match (old.find(&begin), old.find(&end)) {
         (Some(b), Some(_)) => {
@@ -217,7 +250,14 @@ pub fn apply_text_block(
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(target, new)?;
-    Ok((Prior { present: existed, value: None, snapshot }, region_hash))
+    Ok((
+        Prior {
+            present: existed,
+            value: None,
+            snapshot,
+        },
+        region_hash,
+    ))
 }
 
 pub fn revert_text_block(target: &Path, marker: &str, prior: &Prior) -> Result<()> {
@@ -251,7 +291,10 @@ pub fn revert_text_block(target: &Path, marker: &str, prior: &Prior) -> Result<(
 // ---- service (run a start command; reverse by stopping) ----
 
 fn run_shell(cmd: &str) -> Result<bool> {
-    let status = std::process::Command::new("sh").arg("-c").arg(cmd).status()?;
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .status()?;
     Ok(status.success())
 }
 
@@ -259,15 +302,133 @@ pub fn apply_service(start_cmd: &str, dry: bool) -> Result<(Prior, String)> {
     let region_hash = util::sha256_hex(start_cmd.as_bytes());
     if dry {
         println!("  ▶ service start: {}", start_cmd);
-        return Ok((Prior { present: false, value: None, snapshot: None }, region_hash));
+        return Ok((
+            Prior {
+                present: false,
+                value: None,
+                snapshot: None,
+            },
+            region_hash,
+        ));
     }
     if !run_shell(start_cmd)? {
         anyhow::bail!("service start failed: {}", start_cmd);
     }
-    Ok((Prior { present: false, value: None, snapshot: None }, region_hash))
+    Ok((
+        Prior {
+            present: false,
+            value: None,
+            snapshot: None,
+        },
+        region_hash,
+    ))
 }
 
 pub fn revert_service(stop_cmd: &str) -> Result<()> {
     let _ = run_shell(stop_cmd)?; // best-effort stop
+    Ok(())
+}
+
+// ---- pkg_install (create a Python venv + pip install; opt-in removal) ----
+
+fn which(cmd: &str) -> Option<String> {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {}", cmd))
+        .output()
+        .ok()?;
+    if out.status.success() {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// Find a Python <=3.13 interpreter (headroom-ai's Rust/PyO3 core caps at 3.13).
+fn find_python313() -> Option<String> {
+    for c in [
+        "/opt/homebrew/opt/python@3.13/bin/python3.13",
+        "/usr/local/opt/python@3.13/bin/python3.13",
+        "/usr/bin/python3.13",
+    ] {
+        if Path::new(c).exists() {
+            return Some(c.to_string());
+        }
+    }
+    which("python3.13")
+}
+
+/// "present" if the venv already has a headroom binary, else None.
+pub fn current_pkg_install(venv: &Path) -> Result<Option<String>> {
+    Ok(if venv.join("bin/headroom").exists() {
+        Some("present".to_string())
+    } else {
+        None
+    })
+}
+
+/// Create a 3.13 venv and `pip install <spec>` if it doesn't exist yet.
+/// No-ops (and records `present`) if the venv is already there, so revert never
+/// removes a venv ccstack didn't create.
+pub fn apply_pkg_install(venv: &Path, spec: &str, dry: bool) -> Result<(Prior, String)> {
+    let region_hash = util::sha256_hex(spec.as_bytes());
+    let existed = venv.join("bin/headroom").exists();
+    if dry {
+        println!("  ⬇ pkg_install: {} → {}", spec, venv.display());
+        return Ok((
+            Prior {
+                present: existed,
+                value: None,
+                snapshot: None,
+            },
+            region_hash,
+        ));
+    }
+    if existed {
+        return Ok((
+            Prior {
+                present: true,
+                value: None,
+                snapshot: None,
+            },
+            region_hash,
+        ));
+    }
+    let py = find_python313().ok_or_else(|| {
+        anyhow::anyhow!("Python 3.13 not found — headroom-ai needs <=3.13. Install it: brew install python@3.13")
+    })?;
+    println!(
+        "  installing {} into {} (this can take a few minutes)…",
+        spec,
+        venv.display()
+    );
+    if !run_shell(&format!("'{}' -m venv '{}'", py, venv.display()))? {
+        anyhow::bail!("failed to create venv at {}", venv.display());
+    }
+    let pip = venv.join("bin/pip");
+    let _ = run_shell(&format!(
+        "'{}' install -q --upgrade pip",
+        pip.to_string_lossy()
+    ));
+    if !run_shell(&format!("'{}' install '{}'", pip.to_string_lossy(), spec))? {
+        anyhow::bail!("pip install '{}' failed", spec);
+    }
+    Ok((
+        Prior {
+            present: false,
+            value: None,
+            snapshot: None,
+        },
+        region_hash,
+    ))
+}
+
+pub fn revert_pkg_install(venv: &Path, prior: &Prior) -> Result<()> {
+    // opt-in removal: only delete a venv ccstack created, never a pre-existing one.
+    if !prior.present && venv.exists() {
+        std::fs::remove_dir_all(venv)?;
+    }
     Ok(())
 }

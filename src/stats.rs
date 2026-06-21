@@ -25,7 +25,11 @@ impl Usage {
     }
     fn hit_pct(&self) -> f64 {
         let p = self.prompt_total();
-        if p == 0 { 0.0 } else { self.cache_read as f64 / p as f64 * 100.0 }
+        if p == 0 {
+            0.0
+        } else {
+            self.cache_read as f64 / p as f64 * 100.0
+        }
     }
 }
 
@@ -133,7 +137,12 @@ fn parse_session(path: &Path) -> Result<SessionStat> {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "session".into());
-    Ok(SessionStat { id, model, usage, cost })
+    Ok(SessionStat {
+        id,
+        model,
+        usage,
+        cost,
+    })
 }
 
 fn headroom_stats_json() -> Option<Value> {
@@ -183,7 +192,11 @@ fn collect_sessions(filter: Option<&str>) -> Vec<SessionStat> {
     if let Some(sid) = filter {
         sessions.retain(|s| s.id.contains(sid));
     }
-    sessions.sort_by(|a, b| b.cost.partial_cmp(&a.cost).unwrap_or(std::cmp::Ordering::Equal));
+    sessions.sort_by(|a, b| {
+        b.cost
+            .partial_cmp(&a.cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     sessions
 }
 
@@ -226,7 +239,10 @@ pub fn run(json: bool, session: Option<String>) -> Result<()> {
     }
 
     if sessions.is_empty() {
-        println!("No Claude Code sessions found under {}.", projects_dir()?.display());
+        println!(
+            "No Claude Code sessions found under {}.",
+            projects_dir()?.display()
+        );
     } else {
         println!(
             "{:<22} {:<14} {:>10} {:>9} {:>11} {:>7} {:>9}",
@@ -271,8 +287,11 @@ pub fn run(json: bool, session: Option<String>) -> Result<()> {
             println!(
                 "  tokens saved: {}   savings: {}   est $ saved: {}",
                 saved.map(|x| x.to_string()).unwrap_or_else(|| "?".into()),
-                pct.map(|x| format!("{:.1}%", x)).unwrap_or_else(|| "?".into()),
-                cost_saved.map(|x| format!("${:.2}", x)).unwrap_or_else(|| "?".into())
+                pct.map(|x| format!("{:.1}%", x))
+                    .unwrap_or_else(|| "?".into()),
+                cost_saved
+                    .map(|x| format!("${:.2}", x))
+                    .unwrap_or_else(|| "?".into())
             );
         }
         None => {
@@ -285,7 +304,9 @@ pub fn run(json: bool, session: Option<String>) -> Result<()> {
     println!("notes:");
     println!("  • $ uses an approximate built-in price table (edit PRICES in stats.rs); local-model tokens are $0.");
     println!("  • a big cache_read column = prompt caching is working. true cost ≈ input + output + small cache_read.");
-    println!("  • cross-check Anthropic accounting with `bunx ccusage` (maintained pricing + dedup).");
+    println!(
+        "  • cross-check Anthropic accounting with `bunx ccusage` (maintained pricing + dedup)."
+    );
     println!("  • local-model (oMLX) cache truth is in oMLX `usage.cached_tokens` (see agentic_eval) if the router");
     println!("    doesn't surface it as cache_read here.");
     Ok(())
@@ -307,7 +328,10 @@ pub struct Agg {
 
 pub fn aggregate() -> Result<Agg> {
     let sessions = collect_sessions(None);
-    let mut a = Agg { sessions: sessions.len(), ..Default::default() };
+    let mut a = Agg {
+        sessions: sessions.len(),
+        ..Default::default()
+    };
     for s in &sessions {
         a.input += s.usage.input;
         a.output += s.usage.output;
@@ -316,9 +340,18 @@ pub fn aggregate() -> Result<Agg> {
         a.cost_usd += s.cost;
     }
     if let Some(v) = headroom_stats_json() {
-        a.hr_saved = v.pointer("/tokens/saved").and_then(|x| x.as_u64()).unwrap_or(0);
-        a.hr_input = v.pointer("/tokens/input").and_then(|x| x.as_u64()).unwrap_or(0);
-        a.hr_output = v.pointer("/tokens/output").and_then(|x| x.as_u64()).unwrap_or(0);
+        a.hr_saved = v
+            .pointer("/tokens/saved")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        a.hr_input = v
+            .pointer("/tokens/input")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        a.hr_output = v
+            .pointer("/tokens/output")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
     }
     Ok(a)
 }

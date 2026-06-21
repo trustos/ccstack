@@ -1,6 +1,8 @@
 # ccstack
 
-One reversible CLI to set up and manage the **Claude Code** stack — attribution-header KV-cache stability, a hybrid **cloud-plan / local-execute** router, and per-session **token / cache / $ / compression** metrics — where **every change is recorded and fully reversible to a clean slate**.
+[![ci](https://github.com/trustos/ccstack/actions/workflows/ci.yml/badge.svg)](https://github.com/trustos/ccstack/actions/workflows/ci.yml)
+
+One reversible CLI to set up and manage the **Claude Code** stack *and* the local **OpenCode → MTPLX Router → mtplx** stack — attribution-header KV-cache stability, Headroom compression (MCP for subscriptions; optional local proxy), opencode.json provider/agent wiring, and per-session **token / cache / $ / compression** metrics — where **every change is recorded and fully reversible to a clean slate**.
 
 Design & rationale: [`../LocalInference/CCSTACK_DESIGN.md`](../LocalInference/CCSTACK_DESIGN.md). End-to-end runbook: [`../LocalInference/CLAUDE_CODE_HANDOFF.md`](../LocalInference/CLAUDE_CODE_HANDOFF.md).
 
@@ -22,6 +24,11 @@ make help                    # list all targets
 | `~/.claude/mcp.json` → `mcpServers.headroom` | `json_key` | register Headroom MCP compression tools (subscription-safe; no proxy) |
 | `~/.claude/agents/executor.md` | `file_create` | local-model executor subagent (hybrid) |
 | `~/.claude-code-router/config.json` | `file_create` | hybrid router — **API-key billing only** (breaks a Claude subscription's OAuth); opt in with `api_key_billing = true` |
+| `~/.claude/CLAUDE.md` → `headroom_compress` rule | `text_block` | sentinel-delimited usage rule (subscription MCP is on-demand) |
+| `opencode.json` → `provider.mtplx` + `agent.plan/build.model` + `model`/`small_model` | `json_key` | wire OpenCode at the MTPLX Router (carried per-model limits/reasoning/tool_call; preserves your personas) |
+| MTPLX Router `config.json` → `compressionProxyURL` | `json_key` | forward through the Headroom proxy (when `[opencode_local].headroom = true`) |
+| Headroom proxy launchd agent | `service` | run `headroom proxy` (cache mode) → mtplx, when enabled |
+| `~/.headroom-venv` (Python 3.13) | `pkg_install` | auto-create venv + `pip install headroom-ai[…]` (opt-in removal; needs `brew install python@3.13`) |
 
 ## Commands
 
@@ -42,4 +49,4 @@ ccstack measure compare <A> <B>            # off vs on, side by side
 
 Every change is logged to `~/.config/ccstack/state.json` with the prior value, a file snapshot, and a content hash. `revert`/`uninstall` restore exactly the prior state and **refuse to touch anything you've since edited** (drift is reported, not clobbered). Full-file backups live under `~/.config/ccstack/backups/`.
 
-**Status: v0.1** — `json_key` + `file_create` end-to-end (attribution header, executor agent, router config). Next: Headroom `service` lifecycle, a `CLAUDE.md` `text_block` renderer, and a profile-activation selector. Not yet built in CI — compile on macOS and report issues.
+**Status:** all five change-kinds implemented end-to-end — `json_key`, `file_create`, `text_block`, `service`, `pkg_install` — covering both the Claude Code side and the local OpenCode→MTPLX stack, including **self-bootstrapping the 3.13 Headroom venv** (`pkg_install`) so there's no manual prerequisite beyond `brew install python@3.13`. Builds in CI on macOS. Next: a profile-activation selector and `stats`/`measure` polish.

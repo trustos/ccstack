@@ -79,7 +79,11 @@ fn main() -> Result<()> {
         Cmd::Apply { dry_run } => ops::apply(dry_run),
         Cmd::Status => ops::status(),
         Cmd::Verify => ops::verify(),
-        Cmd::Revert { all, profile, change } => ops::revert(all, profile, change),
+        Cmd::Revert {
+            all,
+            profile,
+            change,
+        } => ops::revert(all, profile, change),
         Cmd::Uninstall => ops::revert(true, None, None),
         Cmd::Stats { json, session } => stats::run(json, session),
         Cmd::Measure { action } => match action {
