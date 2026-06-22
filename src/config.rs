@@ -108,7 +108,7 @@ attribution_header = false        # -> CLAUDE_CODE_ATTRIBUTION_HEADER=0 (safe on
 headroom_bin = "~/.headroom-venv/bin/headroom"
 claude_md_rule = true             # write a headroom_compress usage rule into ~/.claude/CLAUDE.md
 headroom_venv = "~/.headroom-venv"          # ccstack creates this 3.13 venv if missing (pkg_install)
-headroom_extras = "mcp,pytorch-mps,code"    # headroom-ai extras (pytorch-mps = the ML compressor)
+headroom_extras = "mcp,proxy,pytorch-mps,code"  # extras: mcp (Claude Code tools) + proxy (local cache-hop server) + pytorch-mps (ML compressor)
 
 # Subscription (OAuth) users: safe, non-routing optimizations only.
 # Headroom runs in MCP mode (compression exposed as tools), NOT as a proxy.

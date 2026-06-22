@@ -99,7 +99,9 @@ fn plan_changes(cfg: &DeclaredConfig) -> Vec<Planned> {
             .global
             .headroom_extras
             .clone()
-            .unwrap_or_else(|| "mcp,pytorch-mps,code".to_string());
+            // `proxy` is required for the local OpenCode→mtplx cache hop (`headroom proxy`);
+            // without it the launchd proxy crash-loops "Proxy dependencies not installed".
+            .unwrap_or_else(|| "mcp,proxy,pytorch-mps,code".to_string());
         out.push(Planned {
             profile: "headroom".into(),
             kind: ChangeKind::PkgInstall,
