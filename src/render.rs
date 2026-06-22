@@ -20,7 +20,12 @@ fn write_json(p: &Path, v: &Value) -> Result<()> {
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(p, serde_json::to_string_pretty(v)?)?;
+    // Atomic write: serialize to a temp file in the same dir, then rename over the target.
+    // rename(2) is atomic, so a concurrent reader/writer of an actively-managed file (e.g.
+    // ~/.claude.json, which Claude Code rewrites live) can never observe a half-written file.
+    let tmp = p.with_extension(format!("ccstack-tmp.{}", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_string_pretty(v)?)?;
+    std::fs::rename(&tmp, p)?;
     Ok(())
 }
 

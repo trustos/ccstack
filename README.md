@@ -23,7 +23,7 @@ make help                    # list all targets
 | Target | Kind | Purpose |
 |---|---|---|
 | `~/.claude/settings.json` → `env.CLAUDE_CODE_ATTRIBUTION_HEADER=0` | `json_key` | stop the changing billing-header hash from busting KV caches |
-| `~/.claude/mcp.json` → `mcpServers.headroom` | `json_key` | register Headroom MCP compression tools (subscription-safe; no proxy) |
+| `~/.claude.json` → `mcpServers.headroom` | `json_key` | register Headroom MCP compression tools at **user scope** — the file Claude Code actually reads for global MCP servers (subscription-safe; no proxy). Atomic write so the live `~/.claude.json` (auth/history) is never half-written |
 | `~/.claude/agents/executor.md` | `file_create` | local-model executor subagent (hybrid) |
 | `~/.claude-code-router/config.json` | `file_create` | hybrid router — **API-key billing only** (breaks a Claude subscription's OAuth); opt in with `api_key_billing = true` |
 | `~/.claude/CLAUDE.md` → `headroom_compress` rule | `text_block` | sentinel-delimited usage rule (subscription MCP is on-demand) |

@@ -119,9 +119,14 @@ fn plan_changes(cfg: &DeclaredConfig) -> Vec<Planned> {
         out.push(Planned {
             profile: "headroom".into(),
             kind: ChangeKind::JsonKey,
-            target: "~/.claude/mcp.json".into(),
+            // Claude Code reads user-scoped MCP servers from ~/.claude.json (top-level
+            // `mcpServers` = user scope, loads in all projects). It does NOT read
+            // ~/.claude/mcp.json — writing there leaves the server silently inactive.
+            target: "~/.claude.json".into(),
             key_path: Some("mcpServers.headroom".into()),
-            value: Some(serde_json::json!({"command": cmd, "args": ["mcp", "serve"]})),
+            value: Some(
+                serde_json::json!({"type": "stdio", "command": cmd, "args": ["mcp", "serve"]}),
+            ),
             contents: None,
             applied_value: Some(format!("{} mcp serve", cmd)),
         });
