@@ -375,8 +375,51 @@ pub fn apply(dry: bool) -> Result<()> {
     if !dry {
         ledger.save()?;
         println!("ledger updated ({} entries)", ledger.changes.len());
+
+        // If the local Headroom cache hop is on, the proxy launchd job can take a few seconds
+        // to bind. Verify it actually came up and warn loudly if not — the router's
+        // compressionProxyURL now points at it, so a dead proxy would break the local path.
+        let oc = &cfg.opencode_local;
+        if oc.enabled && oc.headroom {
+            let port = oc.headroom_port.unwrap_or(8787) as u16;
+            let mut up = false;
+            for _ in 0..25 {
+                if proxy_reachable(port) {
+                    up = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+            if up {
+                println!("  ✓ headroom proxy reachable on :{port}");
+            } else {
+                let venv = cfg
+                    .global
+                    .headroom_venv
+                    .as_deref()
+                    .unwrap_or("~/.headroom-venv");
+                eprintln!(
+                    "  ⚠ headroom proxy is NOT up on :{port} after ~10s — the router's \
+                     compressionProxyURL points at it, so the local path fails until it runs.\n    \
+                     See /tmp/ccstack-headroom-proxy.log. Common cause: the venv lacks the `proxy` \
+                     extra → run\n      {venv}/bin/python -m pip install 'headroom-ai[proxy]'\n    \
+                     then `launchctl kickstart -k gui/$(id -u)/com.ccstack.headroom-proxy`."
+                );
+            }
+        }
     }
     Ok(())
+}
+
+/// Quick TCP reachability probe for a local port (the Headroom proxy).
+fn proxy_reachable(port: u16) -> bool {
+    use std::net::TcpStream;
+    use std::time::Duration;
+    format!("127.0.0.1:{port}")
+        .parse()
+        .ok()
+        .and_then(|addr| TcpStream::connect_timeout(&addr, Duration::from_millis(400)).ok())
+        .is_some()
 }
 
 fn sync_state(c: &Change, target: &Path) -> Result<&'static str> {
