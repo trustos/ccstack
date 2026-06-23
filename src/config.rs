@@ -14,6 +14,8 @@ pub struct DeclaredConfig {
     pub providers: BTreeMap<String, Provider>,
     #[serde(default)]
     pub opencode_local: OpenCodeLocal,
+    #[serde(default)]
+    pub compress_hook: CompressHook,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -88,6 +90,41 @@ pub struct OpenCodeLocal {
     pub headroom_port: Option<u32>,
 }
 
+/// Subscription-safe AUTOMATIC compression for Claude Code: a PostToolUse hook that
+/// pipes large tool outputs through Headroom (locally, no proxy / no ANTHROPIC_BASE_URL,
+/// so it never touches OAuth) and returns `updatedToolOutput` so the model sees fewer
+/// tokens. Closes the gap that Headroom's MCP is on-demand-only and its proxy breaks a
+/// subscription's OAuth. Installs a generated hook script (file_create) + registers it in
+/// ~/.claude/settings.json `hooks.PostToolUse` (json_key) — both reversible in the ledger.
+#[derive(Debug, Default, Deserialize)]
+pub struct CompressHook {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Skip compression for tool outputs below this rough token count (cheap pre-check
+    /// runs BEFORE importing headroom, so small/fast tool calls pay no penalty). Default 1500.
+    #[serde(default)]
+    pub min_tokens: Option<u32>,
+    /// Claude Code hook `matcher` — which tools to compress. Default "Bash|WebFetch"
+    /// (verbose + rarely needed verbatim). Add Read/Grep/Glob at your own risk (the model
+    /// often needs exact lines/paths from those). Never include Edit/Write.
+    #[serde(default)]
+    pub tools: Option<String>,
+    /// Headroom Kompress (ML) model. "disabled" (default) = structural compression only
+    /// (SmartCrusher + CacheAligner: dedup logs/JSON; fast, offline, no model load per call).
+    /// Set a HuggingFace id to enable ML prose compression (slower; loads a model).
+    #[serde(default)]
+    pub kompress_model: Option<String>,
+    /// Where the hook stashes the full original (for lossless recovery via `Read`).
+    /// Default "~/.config/ccstack/originals".
+    #[serde(default)]
+    pub originals_dir: Option<String>,
+    /// Unix socket the warm compression daemon listens on (and the hook connects to). The
+    /// daemon loads the Headroom model once and stays warm, so the per-call hook never reloads
+    /// it. Default "~/.config/ccstack/compress-daemon.sock".
+    #[serde(default)]
+    pub socket: Option<String>,
+}
+
 impl DeclaredConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let txt =
@@ -145,4 +182,22 @@ headroom_port     = 8787
 [providers.omlx]
 base_url = "http://127.0.0.1:1234/v1/chat/completions"
 api_key  = "1234"
+
+# Subscription-safe AUTOMATIC compression. Headroom's MCP is on-demand-only and its proxy
+# breaks subscription OAuth — this fills the gap with a Claude Code PostToolUse hook that
+# compresses large tool outputs locally (no proxy, no ANTHROPIC_BASE_URL) and returns
+# updatedToolOutput. A launchd daemon loads the Headroom model ONCE and stays warm; the hook is
+# a thin Unix-socket client (sub-100ms/call, no per-call model reload). `apply` installs the
+# daemon script + plist + launchd service + the hook script + its settings.json registration —
+# all reversible via the ledger. Needs Claude Code >= 2.1.121.
+[compress_hook]
+enabled        = false             # flip to true, then `ccstack apply`
+min_tokens     = 1500              # only compress tool outputs bigger than this (cheap pre-check)
+tools          = "Bash|WebFetch"   # matcher: which tools to compress (add Read/Grep at your own risk)
+# kompress_model unset = Headroom's default ML text compressor (compresses logs/dumps ~40-65%).
+# The warm daemon absorbs the model-load cost ONCE, so per-call latency stays low. Set
+# "disabled" for structural-only (no ML), or a HuggingFace id for a domain-specific model.
+# kompress_model = "disabled"
+originals_dir  = "~/.config/ccstack/originals"          # full originals stashed here for lossless Read-recovery
+# socket       = "~/.config/ccstack/compress-daemon.sock"  # daemon socket (default shown)
 "#;

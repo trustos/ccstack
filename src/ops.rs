@@ -148,6 +148,100 @@ fn plan_changes(cfg: &DeclaredConfig) -> Vec<Planned> {
         });
     }
 
+    // Subscription-safe AUTOMATIC compression (warm-daemon architecture). Headroom's MCP is
+    // on-demand-only and its proxy breaks subscription OAuth; this fills the gap with a Claude
+    // Code PostToolUse hook that compresses large tool outputs locally (no proxy / no
+    // ANTHROPIC_BASE_URL → never touches OAuth). A launchd daemon loads the Headroom model ONCE
+    // and stays warm; the hook is a thin Unix-socket client → sub-100ms/call instead of a
+    // multi-second model reload every call. Five reversible changes (file_create ×3 + service +
+    // json_key), all recorded in the ledger.
+    let ch = &cfg.compress_hook;
+    if ch.enabled {
+        let min_tokens = ch.min_tokens.unwrap_or(1500);
+        let tools = ch
+            .tools
+            .clone()
+            .unwrap_or_else(|| "Bash|WebFetch".to_string());
+        let originals = ch
+            .originals_dir
+            .clone()
+            .unwrap_or_else(|| "~/.config/ccstack/originals".to_string());
+        let socket = ch
+            .socket
+            .clone()
+            .unwrap_or_else(|| "~/.config/ccstack/compress-daemon.sock".to_string());
+        let py = headroom_python(cfg);
+        let abs = |t: &str| {
+            util::expand_tilde(t)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| t.to_string())
+        };
+        let daemon_target = "~/.config/ccstack/hooks/compress-daemon.py";
+        let hook_target = "~/.config/ccstack/hooks/compress-tool-output.py";
+        let plist_target = "~/Library/LaunchAgents/com.ccstack.compress-daemon.plist";
+
+        // 1) warm daemon: imports headroom once, holds the model, serves compress over a socket.
+        out.push(Planned {
+            profile: "headroom".into(),
+            kind: ChangeKind::FileCreate,
+            target: daemon_target.into(),
+            key_path: None,
+            value: None,
+            contents: Some(compress_daemon_script(
+                ch.kompress_model.as_deref(),
+                &socket,
+            )),
+            applied_value: None,
+        });
+        // 2) launchd plist (absolute paths — launchd does not expand ~).
+        out.push(Planned {
+            profile: "headroom".into(),
+            kind: ChangeKind::FileCreate,
+            target: plist_target.into(),
+            key_path: None,
+            value: None,
+            contents: Some(compress_daemon_plist(&py, &abs(daemon_target))),
+            applied_value: None,
+        });
+        // 3) load the daemon (reverse = unload).
+        let plist = "$HOME/Library/LaunchAgents/com.ccstack.compress-daemon.plist";
+        out.push(Planned {
+            profile: "headroom".into(),
+            kind: ChangeKind::Service,
+            target: "compress-daemon".into(),
+            key_path: None,
+            value: None,
+            contents: Some(format!(
+                "launchctl unload {p} 2>/dev/null; launchctl load -w {p}",
+                p = plist
+            )),
+            applied_value: Some(format!("launchctl unload -w {}", plist)),
+        });
+        // 4) the thin hook client (no model load — talks to the daemon; passthrough if it's down).
+        out.push(Planned {
+            profile: "headroom".into(),
+            kind: ChangeKind::FileCreate,
+            target: hook_target.into(),
+            key_path: None,
+            value: None,
+            contents: Some(compress_hook_client_script(min_tokens, &socket, &originals)),
+            applied_value: None,
+        });
+        // 5) register the hook (command needs ABSOLUTE paths — Claude Code does not expand ~).
+        let command = format!("{} {}", py, abs(hook_target));
+        out.push(Planned {
+            profile: "headroom".into(),
+            kind: ChangeKind::JsonKey,
+            target: "~/.claude/settings.json".into(),
+            key_path: Some("hooks.PostToolUse".into()),
+            value: Some(serde_json::json!([
+                {"matcher": tools, "hooks": [{"type": "command", "command": command}]}
+            ])),
+            contents: None,
+            applied_value: Some(command),
+        });
+    }
+
     // Local stack: OpenCode -> MTPLX Router -> mtplx (+ optional Headroom proxy hop).
     let oc = &cfg.opencode_local;
     if oc.enabled {
@@ -239,6 +333,281 @@ fn headroom_plist(cfg: &DeclaredConfig, oc: &crate::config::OpenCodeLocal, port:
         mode = mode,
         upstream = upstream
     )
+}
+
+/// Absolute path to the headroom-venv python — the compression hook does `import headroom`,
+/// so it must run under that venv. Prefers `[global].headroom_venv`/bin/python, else derives
+/// from `headroom_bin` (…/bin/headroom → …/bin/python), else falls back to `python3`.
+fn headroom_python(cfg: &DeclaredConfig) -> String {
+    if let Some(venv) = &cfg.global.headroom_venv {
+        if let Ok(p) = util::expand_tilde(venv) {
+            return p.join("bin/python").to_string_lossy().into_owned();
+        }
+    }
+    if let Some(bin) = &cfg.global.headroom_bin {
+        if let Ok(p) = util::expand_tilde(bin) {
+            if let Some(parent) = p.parent() {
+                return parent.join("python").to_string_lossy().into_owned();
+            }
+        }
+    }
+    "python3".to_string()
+}
+
+/// Python literal for the kompress model: unset/"default" => None (Headroom's default ML text
+/// compressor — the path that actually compresses logs/dumps); "disabled" => structural-only
+/// (fast, no ML load, but rarely compresses prose); a HF id => that model.
+fn kompress_literal(kompress_model: Option<&str>) -> String {
+    match kompress_model {
+        None => "None".to_string(),
+        Some(s) if s.is_empty() || s.eq_ignore_ascii_case("default") => "None".to_string(),
+        Some(s) => format!("{s:?}"),
+    }
+}
+
+/// The warm compression daemon (Python). Runs under the headroom-venv python via launchd:
+/// imports headroom ONCE, pre-warms the model, and serves "compress this text" requests over a
+/// Unix socket so the per-call hook never reloads the model. One request per connection: the
+/// client sends a JSON body then half-closes; the daemon reads to EOF, compresses, replies JSON.
+fn compress_daemon_script(kompress_model: Option<&str>, socket: &str) -> String {
+    const TPL: &str = r#"#!/usr/bin/env python3
+# ccstack-managed warm compression daemon — do NOT edit by hand (change ccstack.toml + re-apply).
+# Loads Headroom's compressor ONCE (model stays warm) and serves compress requests over a Unix
+# socket, so the PostToolUse hook is a thin, fast client (no per-call model reload).
+import os, sys, json, socket, threading, signal
+
+SOCKET_PATH = os.path.expanduser("__SOCKET__")
+KOMPRESS_MODEL = __KOMPRESS_MODEL__
+
+_lock = threading.Lock()
+_compress = None
+_CompressConfig = None
+
+def _cfg(min_tokens):
+    return _CompressConfig(
+        compress_user_messages=True,
+        protect_recent=0,
+        protect_analysis_context=True,
+        min_tokens_to_compress=min_tokens,
+        kompress_model=KOMPRESS_MODEL,
+    )
+
+def _warm():
+    global _compress, _CompressConfig
+    from headroom.compress import compress as c, CompressConfig as cc
+    _compress, _CompressConfig = c, cc
+    try:  # force the model to load now so the first real request is fast
+        _compress([{"role": "user", "content": "warmup " * 300}], config=_cfg(50))
+    except Exception:
+        pass
+
+def _compressed_text(messages):
+    out = ""
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, str):
+            out += c
+        elif isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict) and isinstance(b.get("text"), str):
+                    out += b["text"]
+    return out
+
+def _handle(conn):
+    try:
+        chunks = []
+        while True:
+            b = conn.recv(65536)
+            if not b:
+                break
+            chunks.append(b)
+        raw = b"".join(chunks)
+        if not raw:
+            return
+        req = json.loads(raw.decode("utf-8", "replace"))
+        text = req.get("text", "")
+        min_tokens = int(req.get("min_tokens", 1500))
+        with _lock:
+            res = _compress([{"role": "user", "content": text}], config=_cfg(min_tokens))
+        resp = {
+            "compressed": _compressed_text(res.messages),
+            "tokens_before": res.tokens_before,
+            "tokens_after": res.tokens_after,
+            "tokens_saved": res.tokens_saved,
+        }
+    except Exception as e:
+        resp = {"error": "%s: %s" % (type(e).__name__, e)}
+    try:
+        conn.sendall(json.dumps(resp).encode("utf-8"))
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+def main():
+    try:
+        os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
+    except Exception:
+        pass
+    if os.path.exists(SOCKET_PATH):
+        try:
+            os.unlink(SOCKET_PATH)
+        except OSError:
+            pass
+    _warm()  # load the model BEFORE binding, so a bound socket means "ready"
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(SOCKET_PATH)
+    try:
+        os.chmod(SOCKET_PATH, 0o600)
+    except OSError:
+        pass
+    srv.listen(16)
+
+    def _bye(*_a):
+        try:
+            os.unlink(SOCKET_PATH)
+        except OSError:
+            pass
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, _bye)
+    signal.signal(signal.SIGINT, _bye)
+    sys.stderr.write("compress-daemon ready on %s\n" % SOCKET_PATH)
+    sys.stderr.flush()
+    while True:
+        try:
+            conn, _ = srv.accept()
+        except OSError:
+            break
+        threading.Thread(target=_handle, args=(conn,), daemon=True).start()
+
+if __name__ == "__main__":
+    main()
+"#;
+    TPL.replace("__SOCKET__", socket)
+        .replace("__KOMPRESS_MODEL__", &kompress_literal(kompress_model))
+}
+
+/// launchd plist for the warm compression daemon (RunAtLoad + KeepAlive). Absolute paths only —
+/// launchd does not expand `~`. `bin` is the headroom-venv python; `script` the daemon's path.
+fn compress_daemon_plist(bin: &str, script: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.ccstack.compress-daemon</string>
+  <key>ProgramArguments</key><array>
+    <string>{bin}</string><string>{script}</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/ccstack-compress-daemon.log</string>
+  <key>StandardErrorPath</key><string>/tmp/ccstack-compress-daemon.log</string>
+</dict></plist>
+"#,
+        bin = bin,
+        script = script
+    )
+}
+
+/// The PostToolUse hook (Python) — a THIN CLIENT to the warm daemon. A cheap size-gate runs
+/// first (small/fast tool calls pay nothing); large outputs are sent to the daemon over the
+/// socket and the compressed text is returned as `updatedToolOutput`. The full original is
+/// stashed in ORIGINALS_DIR for lossless `Read`-recovery. Any error (incl. daemon down) →
+/// passthrough (exit 0) so a tool result is never broken.
+fn compress_hook_client_script(min_tokens: u32, socket: &str, originals_dir: &str) -> String {
+    const TPL: &str = r#"#!/usr/bin/env python3
+# ccstack-managed — do NOT edit by hand. Change [compress_hook] in ccstack.toml and re-apply.
+# Claude Code PostToolUse hook: thin client to the warm Headroom compress daemon. Local only,
+# no proxy / no ANTHROPIC_BASE_URL -> subscription-safe. Returns updatedToolOutput so the model
+# sees fewer tokens; stashes the full original for lossless Read-recovery.
+import sys, json, os, socket, hashlib
+
+SOCKET_PATH = os.path.expanduser("__SOCKET__")
+MIN_TOKENS = __MIN_TOKENS__
+ORIGINALS_DIR = os.path.expanduser("__ORIGINALS_DIR__")
+
+def _text(resp):
+    if resp is None:
+        return ""
+    if isinstance(resp, str):
+        return resp
+    if isinstance(resp, dict):
+        for k in ("text", "content", "output", "result", "stdout"):
+            v = resp.get(k)
+            if isinstance(v, str) and v:
+                if k == "stdout":
+                    err = resp.get("stderr")
+                    return v + ("\n" + err if isinstance(err, str) and err else "")
+                return v
+        return json.dumps(resp, ensure_ascii=False)
+    if isinstance(resp, list):
+        parts = []
+        for b in resp:
+            if isinstance(b, dict) and isinstance(b.get("text"), str):
+                parts.append(b["text"])
+            elif isinstance(b, str):
+                parts.append(b)
+        return "\n".join(parts) if parts else json.dumps(resp, ensure_ascii=False)
+    return str(resp)
+
+def _ask_daemon(text):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(60)
+    s.connect(SOCKET_PATH)
+    s.sendall(json.dumps({"text": text, "min_tokens": MIN_TOKENS}).encode("utf-8"))
+    s.shutdown(socket.SHUT_WR)
+    chunks = []
+    while True:
+        b = s.recv(65536)
+        if not b:
+            break
+        chunks.append(b)
+    s.close()
+    return json.loads(b"".join(chunks).decode("utf-8", "replace"))
+
+def main():
+    try:
+        data = json.load(sys.stdin)
+    except Exception:
+        return 0
+    resp = data.get("tool_response")
+    if resp is None:
+        resp = data.get("tool_output")
+    if resp is None:
+        resp = data.get("tool_result")
+    text = _text(resp)
+    if len(text) < MIN_TOKENS * 4:  # cheap gate; tiny outputs never hit the daemon
+        return 0
+    try:
+        r = _ask_daemon(text)
+    except Exception:
+        return 0  # daemon down/unreachable -> passthrough (never block the tool)
+    comp = r.get("compressed", "")
+    if r.get("error") or not comp or r.get("tokens_saved", 0) <= 0 or len(comp) >= len(text):
+        return 0  # no real benefit -> passthrough
+    h = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12]
+    try:
+        os.makedirs(ORIGINALS_DIR, exist_ok=True)
+        path = os.path.join(ORIGINALS_DIR, h + ".txt")
+        with open(path, "w") as f:
+            f.write(text)
+        note = "\n\n[ccstack-headroom: compressed ~%d->%d tokens. Full original: Read %s]" % (
+            r.get("tokens_before", 0), r.get("tokens_after", 0), path)
+    except Exception:
+        note = "\n\n[ccstack-headroom: compressed output]"
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PostToolUse",
+        "updatedToolOutput": comp + note,
+    }}))
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
+"#;
+    TPL.replace("__SOCKET__", socket)
+        .replace("__MIN_TOKENS__", &min_tokens.to_string())
+        .replace("__ORIGINALS_DIR__", originals_dir)
 }
 
 fn executor_agent(exec_model: &str) -> String {
@@ -404,6 +773,38 @@ pub fn apply(dry: bool) -> Result<()> {
                      See /tmp/ccstack-headroom-proxy.log. Common cause: the venv lacks the `proxy` \
                      extra → run\n      {venv}/bin/python -m pip install 'headroom-ai[proxy]'\n    \
                      then `launchctl kickstart -k gui/$(id -u)/com.ccstack.headroom-proxy`."
+                );
+            }
+        }
+
+        // The compression daemon pre-loads the Headroom model BEFORE binding its socket, so a
+        // present socket means "warm + ready" (can take ~10-15s). Wait for it and report.
+        let chk = &cfg.compress_hook;
+        if chk.enabled {
+            let socket = chk
+                .socket
+                .clone()
+                .unwrap_or_else(|| "~/.config/ccstack/compress-daemon.sock".to_string());
+            let sock_path = util::expand_tilde(&socket).unwrap_or_else(|_| socket.clone().into());
+            let mut up = false;
+            for _ in 0..50 {
+                if sock_path.exists() {
+                    up = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+            if up {
+                println!(
+                    "  ✓ compress daemon warm + listening on {}",
+                    sock_path.display()
+                );
+            } else {
+                eprintln!(
+                    "  ⚠ compress daemon socket not up after ~20s ({}). The PostToolUse hook \
+                     safely passes through until it warms.\n    See /tmp/ccstack-compress-daemon.log; \
+                     retry `launchctl kickstart -k gui/$(id -u)/com.ccstack.compress-daemon`.",
+                    sock_path.display()
                 );
             }
         }
