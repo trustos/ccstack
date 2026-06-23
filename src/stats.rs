@@ -125,10 +125,8 @@ fn parse_session(path: &Path) -> Result<SessionStat> {
         if let Some((m, u)) = parse_line_usage(&v) {
             cost += cost_of(&m, &u);
             usage.add(&u);
-            // remember a cloud model name if any turn used one
-            if price(&m).is_some() {
-                model = m;
-            } else if model == "-" {
+            // remember a cloud model name if any turn used one (or fill the "-" placeholder)
+            if price(&m).is_some() || model == "-" {
                 model = m;
             }
         }
